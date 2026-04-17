@@ -23,7 +23,7 @@ app = typer.Typer(help="Ingest markdown files from a source directory into the w
 def _default(ctx: typer.Context):
     """Run ingest when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, limit=None, workers=4)
+        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, limit=None, workers=1)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -231,8 +231,12 @@ def rebuild_index():
 
 SYSTEM_PROMPT = """\
 You are a wiki maintenance agent. Given a source document and the current wiki state, you:
-1. Identify concepts and entities in the source that are not yet covered — create new pages for them.
-2. Identify existing pages that should be updated with information from this source.
+1. Identify existing pages that overlap with the source and update them — prefer merging over creating.
+2. Only create a new page when no existing page covers the same core concept.
+
+MERGE RULE: If a related page has similarity ≥ 0.60, you MUST put it in updated_pages.
+Do NOT create a new page for a concept already covered by a high-similarity page.
+New pages are only for genuinely new concepts with no similar existing page (similarity < 0.40).
 
 Write all page titles, body content, and descriptions in Korean.
 Return ONLY a valid JSON object — no markdown fences, no prose."""
@@ -282,7 +286,7 @@ def build_prompt(
     source_path: str,
     source_text: str,
     index_text: str,
-    related: dict[str, str],
+    related: dict[str, tuple[str, float]],
     context_length: int = 8192,
 ) -> str:
     source_lim, index_lim, excerpt_lim = _compute_char_budgets(
@@ -300,11 +304,16 @@ def build_prompt(
     ]
     if related:
         parts += ["", "## Existing related pages (excerpts)"]
-        for title, excerpt in related.items():
-            parts += [f"### {title}", excerpt[:excerpt_lim]]
+        for title, (excerpt, score) in related.items():
+            merge_hint = " ← MERGE RULE: similarity ≥ 0.60, must use updated_pages" if score >= 0.60 else ""
+            parts += [f"### {title} [유사도: {score:.0%}]{merge_hint}", excerpt[:excerpt_lim]]
     parts += [
         "",
         "## Instructions",
+        "- Pages with similarity ≥ 60%: put in updated_pages (do NOT create a new page for the same topic)",
+        "- Pages with similarity < 40% and no related page: put in new_pages",
+        "- When in doubt, prefer updated_pages over new_pages",
+        "",
         "Return JSON with this exact structure:",
         '{',
         '  "new_pages": [',
@@ -319,7 +328,7 @@ def build_prompt(
         '    {',
         '      "title": "Exact existing page title",',
         '      "body": "updated full markdown body",',
-        '      "timeline_tag": "[refined] OR [linked] OR [corrected]",',
+        '      "timeline_tag": "[refined] OR [updated] OR [corrected]",',
         '      "timeline_detail": "what changed and why"',
         '    }',
         '  ]',
@@ -456,7 +465,7 @@ def _llm_phase(
             else:
                 print(f"\r{line}", flush=True)
 
-    titles_inline = ", ".join(related.keys()) if related else "none"
+    titles_inline = ", ".join(f"{t}({s:.0%})" for t, (_, s) in related.items()) if related else "none"
     live_status(f"LLM 호출 중... ({len(related)} pages: {titles_inline})")
 
     prompt = build_prompt(rel, source_text, index_text, related, context_length)
@@ -489,7 +498,7 @@ def ingest(
     ),
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
-    workers: int = typer.Option(4, help="Number of parallel LLM workers."),
+    workers: int = typer.Option(1, help="Number of parallel LLM workers."),
 ):
     """Ingest markdown source files into the wiki."""
     if not source_dir:

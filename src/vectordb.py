@@ -192,8 +192,11 @@ def find_related(
     vec_distance_cap: float = 0.65,
     rrf_min_score: float = 0.9,
     embed_fn: EmbedFn | None = None,
-) -> dict[str, str]:
+) -> dict[str, tuple[str, float]]:
     """Hybrid search: vector + BM25 (each pre-filtered) → RRF → top N pages.
+
+    Returns dict of title → (excerpt, similarity_score).
+    similarity_score is cosine similarity (0–1) if vector search succeeded, else normalized RRF score.
 
     BM25 candidates are cut at the first natural score gap (relative drop ≥ 35%).
     Vector candidates are capped by cosine distance (0=identical, 2=opposite).
@@ -206,13 +209,14 @@ def find_related(
 
     # ── vector — filtered by cosine distance ──────────────────────────────────
     vec_titles: list[str] = []
+    vec_sims: dict[str, float] = {}
     if embed_fn is not None:
         try:
             table = get_table()
             if table.count_rows() > 0:
                 query_vec = embed_fn([source_text[:_get_embed_max_chars()]])[0]
                 rows = table.search(query_vec).limit(inner_limit).to_list()
-                
+
                 vec_candidates = []
                 seen: set[str] = set()
                 for row in rows:
@@ -221,8 +225,10 @@ def find_related(
                     if t not in seen and t in all_pages and d <= vec_distance_cap:
                         sim = max(0.01, 1.0 - (d / 2.0))
                         vec_candidates.append((t, sim))
+                        if t not in vec_sims or sim > vec_sims[t]:
+                            vec_sims[t] = sim
                         seen.add(t)
-                        
+
                 if vec_candidates:
                     sims = [s for _, s in vec_candidates]
                     cutoff = _gap_cutoff(sims, gap=0.10, min_results=3)
@@ -234,7 +240,7 @@ def find_related(
     lists = [lst for lst in [vec_titles, bm25_titles] if lst]
     if not lists:
         return {}
-        
+
     fused_scores = _rrf_fuse_with_scores(lists)
 
     fused_items = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
@@ -243,4 +249,9 @@ def find_related(
     # 2. Exclusively overlaps, if any overlap exists (as single items score ~0.5 relative to overlap).
     candidates = [(t, s) for t, s in fused_items if s >= rrf_min_score]
 
-    return {t: all_pages[t][:1500] for t, _ in candidates[:n] if t in all_pages}
+    result: dict[str, tuple[str, float]] = {}
+    for t, rrf_score in candidates[:n]:
+        if t in all_pages:
+            score = vec_sims.get(t, rrf_score)
+            result[t] = (all_pages[t][:1500], score)
+    return result

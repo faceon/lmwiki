@@ -7,4 +7,10 @@ __pycache__/
 
 .claude/
 
+# generated wiki outputs
 log.json
+.vectordb/
+
+# obsidian
+.obsidian/
+.trash/
