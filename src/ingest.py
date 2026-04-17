@@ -19,8 +19,19 @@ import eventlog
 app = typer.Typer(help="Ingest markdown files from a source directory into the wiki.", invoke_without_command=True)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-SYSTEM_PROMPT = (_PROMPTS_DIR / "system.md").read_text(encoding="utf-8").strip()
-_USER_TEMPLATE = (_PROMPTS_DIR / "user.md").read_text(encoding="utf-8")
+_SYSTEM_PROMPT_FILE = _PROMPTS_DIR / "ingest.system.md"
+_USER_PROMPT_FILE = _PROMPTS_DIR / "ingest.user.md"
+SYSTEM_PROMPT = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
+_USER_TEMPLATE = _USER_PROMPT_FILE.read_text(encoding="utf-8")
+
+def _prompt_hash(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+_PROMPT_HASHES = {
+    "system": _prompt_hash(_SYSTEM_PROMPT_FILE),
+    "user": _prompt_hash(_USER_PROMPT_FILE),
+}
 
 
 @app.callback()
@@ -597,6 +608,8 @@ def _llm_phase(
         file=rel,
         model=model,
         api_base=api_base,
+        prompt_files={"system": str(_SYSTEM_PROMPT_FILE.name), "user": str(_USER_PROMPT_FILE.name)},
+        prompt_hashes=_PROMPT_HASHES,
         prompt_chars=len(prompt),
         context_length=context_length,
         n_related=len(related),
