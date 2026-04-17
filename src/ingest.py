@@ -47,7 +47,8 @@ def source_date(filepath: Path) -> str:
     """Return creation date for a source file.
 
     Priority:
-    1. `created` field in the file's own frontmatter
+    1. `created` or `date` field in the file's own frontmatter
+       (journals typically use `date`; the schema uses `created`)
     2. File system birth time (st_birthtime on macOS, st_mtime fallback)
     3. Current date
     """
@@ -56,8 +57,9 @@ def source_date(filepath: Path) -> str:
         m = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
         if m:
             for line in m.group(1).splitlines():
-                if line.startswith("created:"):
-                    val = line[8:].strip().strip("'\"")
+                fm_match = re.match(r"^(created|date):\s*(.+)$", line)
+                if fm_match:
+                    val = fm_match.group(2).strip().strip("'\"")
                     if val:
                         return val
     except OSError:
@@ -71,6 +73,16 @@ def source_date(filepath: Path) -> str:
         pass
 
     return today()
+
+
+def source_title(filepath: Path) -> str:
+    """Human-readable wiki title derived from a source filename.
+
+    Source files often use snake_case or kebab-case; wiki wikilink convention
+    (SCHEMA.md) uses natural Title Case with spaces, so separators are replaced.
+    The source file itself is not renamed.
+    """
+    return filepath.stem.replace("_", " ").replace("-", " ").strip()
 
 # ── log ────────────────────────────────────────────────────────────────────────
 
@@ -86,6 +98,7 @@ def load_log() -> dict:
     data.setdefault("query", {})
     data.setdefault("lint", {})
     data.setdefault("errors", [])
+    data.setdefault("orphans", [])
     return data
 
 def save_log(log_data: dict):
@@ -142,6 +155,22 @@ def _safe_filename(title: str) -> str:
     """Replace filesystem-unsafe characters so any title can be a valid filename."""
     return re.sub(r'[/\\:*?"<>|]', '-', title).strip('-').strip()
 
+def _strip_duplicate_h1(body: str, title: str) -> str:
+    """Strip a leading `# Title` H1 that duplicates the page title.
+
+    The filename already serves as the page title in wikilink-based viewers,
+    so a matching H1 at the top of the body is redundant. H2+ is preserved —
+    the LLM may legitimately use `## <title>` as a section under the body.
+    """
+    stripped = body.lstrip("\n")
+    lines = stripped.splitlines()
+    if not lines:
+        return body
+    m = re.match(r"^#\s+(.+?)\s*$", lines[0].strip())
+    if m and m.group(1).strip() == title.strip():
+        return "\n".join(lines[1:]).lstrip("\n")
+    return body
+
 def find_page_path(title: str) -> Optional[Path]:
     safe = _safe_filename(title)
     for d in TYPE_DIRS.values():
@@ -178,7 +207,8 @@ def write_page(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     fm = render_frontmatter(page_type, created, sources, related)
-    parts = [fm, "", body.strip()]
+    clean_body = _strip_duplicate_h1(body, title).strip()
+    parts = [fm, "", clean_body]
     if timeline:
         parts += ["", "## Timeline", ""] + timeline
     path = target_dir / f"{_safe_filename(title)}.md"
@@ -230,18 +260,122 @@ def rebuild_index():
     lines += ["---", "", f"**Last updated**: {today()}", ""]
     INDEX_FILE.write_text("\n".join(lines), encoding="utf-8")
 
+
+def link_source_siblings(titles: list[str]) -> int:
+    """Cross-link pages derived from the same source.
+
+    After a single source has produced a batch of pages, every page in that
+    batch should list the others in its `related` frontmatter so the wiki's
+    relationship graph stays connected. The page body is left untouched
+    (LLM-authored content is preserved) and timelines are NOT amended —
+    sibling linking is a structural step, not an editorial one.
+
+    Returns the number of pages whose `related` field was actually modified.
+    """
+    unique_titles = [t for t in dict.fromkeys(titles) if t]
+    if len(unique_titles) < 2:
+        return 0
+
+    modified = 0
+    for title in unique_titles:
+        result = read_page(title)
+        if not result:
+            continue
+        meta, body, timeline = result
+        existing = list(meta.get("related", []))
+        sibling_links = [f"[[{s}]]" for s in unique_titles if s != title]
+        merged = list(dict.fromkeys(existing + sibling_links))
+        if merged == existing:
+            continue
+        write_page(
+            title=title,
+            page_type=meta.get("type", "concept"),
+            created=meta.get("created") or today(),
+            sources=meta.get("sources", []),
+            related=merged,
+            body=body,
+            timeline=timeline,
+        )
+        modified += 1
+    return modified
+
+
+def collect_orphan_wikilinks() -> list[dict]:
+    """Scan all wiki page bodies for wikilinks to non-existent wiki pages.
+
+    Returns a list of {"page": <wiki page stem>, "missing": <missing title>} entries.
+    Two kinds of references are intentionally skipped because they point to files
+    outside the wiki tree:
+      - Frontmatter `sources` (handled via page-level parse, not scanned here).
+      - Timeline entries (e.g. "initial page from [[AI Productivity]]").
+    """
+    existing: set[str] = set()
+    for d in TYPE_DIRS.values():
+        if d.exists():
+            for p in d.glob("*.md"):
+                existing.add(p.stem)
+
+    orphans: list[dict] = []
+    for d in TYPE_DIRS.values():
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.md")):
+            result = read_page(p.stem)
+            if not result:
+                continue
+            _, body, _timeline = result
+            seen: set[str] = set()
+            for link in wikilinks_in(body):
+                link = link.strip()
+                if not link or link == p.stem or link in existing or link in seen:
+                    continue
+                orphans.append({"page": p.stem, "missing": link})
+                seen.add(link)
+    return orphans
+
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
 You are a wiki maintenance agent. Given a source document and the current wiki state, you:
 1. Identify existing pages that overlap with the source and update them — prefer merging over creating.
 2. Only create a new page when no existing page covers the same core concept.
+3. Every distinct person, organization, product, service, tool, or named work mentioned in the
+   source must have a corresponding page with `type: "entity"`. If one already exists in the
+   wiki index, reuse and update it; otherwise include it in new_pages.
+   Use `type: "concept"` only for recurring ideas, patterns, or methodologies.
 
 MERGE RULE: If a related page has similarity ≥ 0.60, you MUST put it in updated_pages.
 Do NOT create a new page for a concept already covered by a high-similarity page.
-New pages are only for genuinely new concepts with no similar existing page (similarity < 0.40).
+New pages are only for genuinely new concepts or entities with no similar existing page (similarity < 0.40).
+
+CONCEPT SPLITTING RULE: Prefer fewer, richer concept pages over many stubs.
+- Split a source into multiple concept pages ONLY when each resulting page has clearly
+  independent scope and is likely to recur as an idea in future sources.
+- If several ideas are introduced together as one thought in the source, keep them on a
+  single concept page unless they are clearly reusable on their own.
+- Entities (people, products, orgs, tools) are a separate matter — always extract them,
+  even when only briefly mentioned.
+
+ENTITY BODY RULE: An entity page's body describes what the entity IS — its nature, role,
+or defining attributes — in terms that stay accurate as more sources accumulate.
+- Do NOT write entity bodies as narrations of a single incident (e.g. "used by the author
+  to set up Supabase tables"). Specific events belong in the source page's body or in
+  the entity's timeline, not in the definition.
+- Cross-reference other entities with [[Wikilinks]] when they are definitionally related
+  (e.g. "Google이 개발한 대형 언어 모델" for Gemini), not merely co-mentioned once.
+
+PAGE BODY RULES:
+- Do NOT start the body with an H1 header that duplicates the page title — the filename serves
+  as the title. Begin directly with the one-line definition or content.
+- [[Wikilinks]] in the body MUST reference either (a) a page you are creating in this response,
+  or (b) an existing page listed in the wiki index. Do not leave dangling references to pages
+  that will not exist after this turn.
+- Stay faithful to the source: do not invent numbers, comparisons, quotes, or generalizations
+  that are not supported by the source text. When a source gives a specific example (e.g.
+  "three-person team", "$1.5B → $300M"), preserve it rather than generalizing it away.
 
 Write all page titles, body content, and descriptions in Korean.
+Use natural Title Case for titles with spaces, not underscores (e.g. "Google Cloud Functions").
 Return ONLY a valid JSON object — no markdown fences, no prose."""
 
 # ── context length ─────────────────────────────────────────────────────────────
@@ -617,7 +751,7 @@ def ingest(
             continue
 
         rel = str(filepath)
-        source_link = f"[[{filepath.stem}]]"
+        source_link = f"[[{source_title(filepath)}]]"
         src_date = source_date(filepath)
         page_names_created: list[str] = []
         touched: list[str] = []
@@ -682,15 +816,27 @@ def ingest(
             print(f"  [updated] {title}.md")
             touched.append(title)
 
+        all_siblings = page_names_created + touched
+        linked = link_source_siblings(all_siblings)
+        if linked:
+            print(f"  [linked] {linked} sibling page(s) cross-referenced")
+
         log["ingest"][rel] = {
             "hash": file_hash,
             "ingested_at": now(),
-            "pages": page_names_created + touched,
+            "pages": all_siblings,
         }
         processed += 1
 
     if processed:
         rebuild_index()
+        log["orphans"] = collect_orphan_wikilinks()
+        if log["orphans"]:
+            sample = ", ".join(
+                f"[[{o['missing']}]] ← {o['page']}" for o in log["orphans"][:3]
+            )
+            more = "" if len(log["orphans"]) <= 3 else f", +{len(log['orphans']) - 3} more"
+            print(f"  {len(log['orphans'])} orphan wikilink(s): {sample}{more}")
 
     if processed or log["errors"]:
         save_log(log)

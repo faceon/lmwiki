@@ -7,10 +7,6 @@ __pycache__/
 
 .claude/
 
-# generated wiki outputs
-wiki/
-
-# obsidian
-.obsidian/
-.trash/
-
+# samples
+samples/*
+!samples/source/
