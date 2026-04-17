@@ -49,7 +49,7 @@ Use the first available value in order:
 - **entity**: a person, organization, or work appearing in source documents. Track attributes and relationships to other entities and concepts.
 - **analysis**: a synthesized answer to a specific query. Created when a query produces non-trivial insight worth preserving.
 
-## log.json schema
+## .logs/state.json schema
 
 All timestamps are local time in `YYYY-MM-DD HH:MM` format. `ingest` and `query` accumulate history keyed by source path and query text. `lint` stores only the most recent run and is overwritten each time.
 

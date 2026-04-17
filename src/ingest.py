@@ -1,4 +1,3 @@
-import os
 import json
 import hashlib
 import re
@@ -12,9 +11,10 @@ from datetime import datetime
 import typer
 from litellm import completion
 
-from config import LLM_MODEL, LLM_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
+from config import LLM_MODEL, LLM_API_BASE, EMBED_MODEL, EMBED_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
 from embed import embed as embed_texts, get_context_length
 from vectordb import find_related, upsert_page
+import eventlog
 
 app = typer.Typer(help="Ingest markdown files from a source directory into the wiki.", invoke_without_command=True)
 
@@ -102,7 +102,7 @@ def load_log() -> dict:
     return data
 
 def save_log(log_data: dict):
-    os.makedirs(WIKI_DIR, exist_ok=True)
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOG_FILE.write_text(json.dumps(log_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 # ── frontmatter ────────────────────────────────────────────────────────────────
@@ -478,12 +478,18 @@ def call_llm(
     model: str,
     buf: Optional[list[str]] = None,
     live_status: Optional[callable] = None,  # type: ignore[valid-type]
-) -> str:
+) -> dict:
     """Call LLM with streaming.
 
+    Returns {"text", "total_ms", "thinking_ms", "output_ms"}.
+      total_ms    : wall-clock from request start to final chunk.
+      thinking_ms : time spent in reasoning_content chunks (sum, in case the
+                    provider interleaves). 0 if the model does not expose
+                    reasoning tokens.
+      output_ms   : from the first visible content chunk to the final chunk.
+
     buf: if given, all output lines are buffered here instead of printed.
-    live_status: optional callable(msg) for real-time progress lines (e.g. thinking status).
-                 Always prints directly, independent of buf.
+    live_status: optional callable(msg) for real-time progress lines.
     """
     def emit(text: str, end: str = "\n", flush: bool = False):
         if buf is not None:
@@ -500,11 +506,14 @@ def call_llm(
     kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2, "stream": True}
     if LLM_API_BASE:
         kwargs["api_base"] = LLM_API_BASE
+    total_start = time.monotonic()
     response = completion(**kwargs)  # type: ignore[assignment]
     full = ""
     reasoning = ""
     thinking = False
     thinking_start = 0.0
+    thinking_total = 0.0
+    output_start: Optional[float] = None
 
     for chunk in response:
         delta = chunk.choices[0].delta  # type: ignore[union-attr]
@@ -526,35 +535,47 @@ def call_llm(
         if c:
             if thinking:
                 elapsed = time.monotonic() - thinking_start
+                thinking_total += elapsed
                 emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
                 if live_status:
                     live_status("output 생성 중...")
                 thinking = False
+                if output_start is None:
+                    output_start = time.monotonic()
             elif not full:
                 emit("  Output: ", end="", flush=True)
                 if live_status:
                     live_status("output 생성 중...")
+                if output_start is None:
+                    output_start = time.monotonic()
             full += c
             emit(c, end="", flush=True)
     emit("")
-    return full or reasoning
+    total_end = time.monotonic()
+    return {
+        "text": full or reasoning,
+        "total_ms": int((total_end - total_start) * 1000),
+        "thinking_ms": int(thinking_total * 1000),
+        "output_ms": int((total_end - output_start) * 1000) if output_start is not None else 0,
+    }
 
-def extract_json(text: str) -> dict:
+def extract_json(text: str) -> tuple[dict, bool]:
+    """Return (parsed, repair_used). repair_used is True if json_repair was needed."""
     m = re.search(r"\{.*\}", text, re.DOTALL)
     raw = m.group(0) if m else text
     try:
-        return json.loads(raw)
+        return json.loads(raw), False
     except json.JSONDecodeError:
         pass
     # Fix invalid backslash escapes (e.g. \k, \p) produced by some LLMs.
     fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
     try:
-        return json.loads(fixed)
+        return json.loads(fixed), False
     except json.JSONDecodeError:
         pass
     # Structural repair for badly formed LLM output (missing colons, quotes, etc.)
     from json_repair import repair_json
-    return json.loads(repair_json(fixed))
+    return json.loads(repair_json(fixed)), True
 
 # ── parallel worker ────────────────────────────────────────────────────────────
 
@@ -565,11 +586,12 @@ def _llm_phase(
     model: str,
     print_lock: threading.Lock,
     context_length: int = 8192,
-) -> Optional[tuple[Path, Optional[str], Optional[dict], list[str], Optional[str]]]:
+) -> Optional[tuple[Path, Optional[str], Optional[dict], list[str], Optional[str], dict]]:
     """Hash-check and LLM call for one file. Thread-safe (read-only wiki access).
 
-    Returns (filepath, file_hash, llm_data, output_lines, error) or None if skipped.
+    Returns (filepath, file_hash, llm_data, output_lines, error, related) or None if skipped.
     error is None on success, error message string on failure.
+    related is the hybrid-search result — forwarded to Phase 2 for merge-rule checks.
     """
     buf: list[str] = []
     rel = str(filepath)
@@ -609,7 +631,7 @@ def _llm_phase(
 
     prompt = build_prompt(rel, source_text, index_text, related, context_length)
     try:
-        raw = call_llm(
+        result = call_llm(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -618,14 +640,40 @@ def _llm_phase(
             buf=buf,
             live_status=live_status,
         )
-        data = extract_json(raw)
+        data, json_repair_used = extract_json(result["text"])
     except Exception as e:
         error_msg = str(e)
         live_status(f"오류: {error_msg}")
         buf.append(f"  Error: {error_msg}")
-        return filepath, None, None, buf, error_msg
+        eventlog.emit(
+            "error",
+            file=rel,
+            phase="llm",
+            error=error_msg,
+            exception=type(e).__name__,
+            model=model,
+            api_base=LLM_API_BASE,
+            prompt_chars=len(prompt),
+        )
+        return filepath, None, None, buf, error_msg, related
 
-    return filepath, file_hash, data, buf, None
+    eventlog.emit(
+        "llm_call",
+        file=rel,
+        model=model,
+        api_base=LLM_API_BASE,
+        prompt_chars=len(prompt),
+        context_length=context_length,
+        n_related=len(related),
+        related=[{"title": t, "score": round(s, 3)} for t, (_, s) in related.items()],
+        latency_ms=result["total_ms"],
+        thinking_ms=result["thinking_ms"],
+        output_ms=result["output_ms"],
+        output_chars=len(result["text"]),
+        json_repair_used=json_repair_used,
+    )
+
+    return filepath, file_hash, data, buf, None, related
 
 
 # ── main command ───────────────────────────────────────────────────────────────
@@ -661,6 +709,9 @@ def ingest(
         if vectordb_dir.exists():
             shutil.rmtree(vectordb_dir)
             print(f"  deleted {vectordb_dir}")
+        if eventlog.EVENTS_DIR.exists():
+            shutil.rmtree(eventlog.EVENTS_DIR)
+            print(f"  deleted {eventlog.EVENTS_DIR}")
         if INDEX_FILE.exists():
             INDEX_FILE.unlink()
             print(f"  deleted {INDEX_FILE}")
@@ -696,7 +747,22 @@ def ingest(
     print(f"Found {n_total} file(s): {n_proc} to process, {n_skip} unchanged. "
           f"Workers: {workers}. Context: {ctx_len:,} tokens.")
 
+    eventlog.start_run(
+        model=model,
+        api_base=LLM_API_BASE,
+        embed_model=EMBED_MODEL,
+        embed_api_base=EMBED_API_BASE,
+        context_length=ctx_len,
+        workers=workers,
+        n_files_total=n_total,
+        n_files_skipped=n_skip,
+        n_files_to_process=n_proc,
+        reset=reset,
+    )
+    run_start_t = time.monotonic()
+
     if not files_to_process:
+        eventlog.end_run(duration_ms=0, n_processed=0, n_errors=0)
         print("Nothing to do.")
         return
 
@@ -704,7 +770,7 @@ def ingest(
     index_text = load_index()
 
     # ── Phase 1: LLM calls (parallel) ─────────────────────────────────────────
-    results: list[tuple[Path, str, dict, list[str], None]] = []
+    results: list[tuple[Path, str, dict, list[str], None, dict]] = []
     print_lock = threading.Lock()
     completed = 0
 
@@ -728,10 +794,17 @@ def ingest(
                     "phase": "llm",
                     "timestamp": now(),
                 })
+                eventlog.emit(
+                    "error",
+                    file=str(fp),
+                    phase="worker",
+                    error=error_msg,
+                    exception=type(e).__name__,
+                )
                 continue
             if result is None:
                 continue
-            _, file_hash, data, buf, error = result
+            _, file_hash, data, buf, error, _related = result
             for line in buf:
                 print(line)
             if error is not None:
@@ -746,7 +819,10 @@ def ingest(
 
     # ── Phase 2: write pages (sequential) ─────────────────────────────────────
     processed = 0
-    for filepath, file_hash, data, _, _err in results:
+    n_new_total = 0
+    n_updated_total = 0
+    n_merge_violations_total = 0
+    for filepath, file_hash, data, _, _err, related in results:
         if not data:  # unchanged file
             continue
 
@@ -779,6 +855,13 @@ def ingest(
             upsert_page(title, body, embed_texts)
             print(f"  [new] {ptype}/{title}.md")
             page_names_created.append(title)
+            eventlog.emit(
+                "decision",
+                file=rel,
+                action="new",
+                title=title,
+                page_type=ptype,
+            )
 
         # Update existing pages
         for page in data.get("updated_pages", []):
@@ -792,6 +875,14 @@ def ingest(
             existing = read_page(title)
             if not existing:
                 print(f"  [skip] unknown page in updated_pages: {title!r}")
+                eventlog.emit(
+                    "decision",
+                    file=rel,
+                    action="skipped",
+                    title=title,
+                    reason="unknown_page",
+                    tag=tag,
+                )
                 continue
 
             meta, _, timeline = existing
@@ -815,6 +906,33 @@ def ingest(
             upsert_page(title, new_body, embed_texts)
             print(f"  [updated] {title}.md")
             touched.append(title)
+            eventlog.emit(
+                "decision",
+                file=rel,
+                action="updated",
+                title=title,
+                page_type=meta.get("type", "concept"),
+                tag=tag,
+            )
+
+        # MERGE RULE check: any related page with sim ≥ 0.60 that did NOT land
+        # in updated_pages is a violation — the LLM ignored the hint.
+        updated_titles = {
+            (p.get("title") or "").strip() for p in data.get("updated_pages", [])
+        }
+        for rel_title, (_, score) in related.items():
+            if score >= 0.60 and rel_title not in updated_titles:
+                n_merge_violations_total += 1
+                eventlog.emit(
+                    "merge_violation",
+                    file=rel,
+                    ignored_related_title=rel_title,
+                    similarity=round(score, 3),
+                    new_pages_created=[
+                        (p.get("title") or "").strip()
+                        for p in data.get("new_pages", [])
+                    ],
+                )
 
         all_siblings = page_names_created + touched
         linked = link_source_siblings(all_siblings)
@@ -827,6 +945,8 @@ def ingest(
             "pages": all_siblings,
         }
         processed += 1
+        n_new_total += len(page_names_created)
+        n_updated_total += len(touched)
 
     if processed:
         rebuild_index()
@@ -843,6 +963,16 @@ def ingest(
 
     if log["errors"]:
         print(f"  {len(log['errors'])} error(s) recorded in log.json.")
+
+    eventlog.end_run(
+        duration_ms=int((time.monotonic() - run_start_t) * 1000),
+        n_processed=processed,
+        n_new_pages=n_new_total,
+        n_updated_pages=n_updated_total,
+        n_errors=len(log["errors"]),
+        n_orphans=len(log.get("orphans", [])),
+        n_merge_violations=n_merge_violations_total,
+    )
     print(f"\nDone. {processed} file(s) processed.")
 
 

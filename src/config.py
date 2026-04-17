@@ -12,7 +12,7 @@ EMBED_API_BASE = os.getenv("EMBED_API_BASE", "http://localhost:1234/v1")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "lm_studio/text-embedding-kure-v1")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
 INDEX_FILE = WIKI_DIR / "index.md"
-LOG_FILE = WIKI_DIR / "log.json"
+LOG_FILE = WIKI_DIR / ".logs" / "state.json"
 VECTORDB_DIR = WIKI_DIR / ".vectordb"
 
 TYPE_DIRS = {
