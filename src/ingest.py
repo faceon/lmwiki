@@ -30,7 +30,7 @@ def _default(
 ):
     """Run ingest when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, limit=None, workers=1, reset=reset)
+        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, api_base=None, limit=None, workers=1, reset=reset)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -408,6 +408,7 @@ def build_prompt(
 def call_llm(
     messages: list[dict],
     model: str,
+    api_base: Optional[str] = None,
     buf: Optional[list[str]] = None,
     live_status: Optional[callable] = None,  # type: ignore[valid-type]
 ) -> dict:
@@ -436,8 +437,8 @@ def call_llm(
             print(text, end=end, flush=flush)
 
     kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2, "stream": True}
-    if LLM_API_BASE:
-        kwargs["api_base"] = LLM_API_BASE
+    if api_base:
+        kwargs["api_base"] = api_base
     total_start = time.monotonic()
     response = completion(**kwargs)  # type: ignore[assignment]
     full = ""
@@ -516,6 +517,7 @@ def _llm_phase(
     log: dict,
     index_text: str,
     model: str,
+    api_base: Optional[str],
     print_lock: threading.Lock,
     context_length: int = 8192,
 ) -> Optional[tuple[Path, Optional[str], Optional[dict], list[str], Optional[str], dict]]:
@@ -569,6 +571,7 @@ def _llm_phase(
                 {"role": "user", "content": prompt},
             ],
             model,
+            api_base=api_base,
             buf=buf,
             live_status=live_status,
         )
@@ -584,7 +587,7 @@ def _llm_phase(
             error=error_msg,
             exception=type(e).__name__,
             model=model,
-            api_base=LLM_API_BASE,
+            api_base=api_base,
             prompt_chars=len(prompt),
         )
         return filepath, None, None, buf, error_msg, related
@@ -593,7 +596,7 @@ def _llm_phase(
         "llm_call",
         file=rel,
         model=model,
-        api_base=LLM_API_BASE,
+        api_base=api_base,
         prompt_chars=len(prompt),
         context_length=context_length,
         n_related=len(related),
@@ -616,11 +619,15 @@ def ingest(
         str(SOURCE_DIR), help="Source directory path."
     ),
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
+    api_base: Optional[str] = typer.Option(None, "--api-base", help="LLM API base URL. Overrides LLM_API_BASE env var."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
     workers: int = typer.Option(1, help="Number of parallel LLM workers."),
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
 ):
     """Ingest markdown source files into the wiki."""
+    if api_base is None:
+        api_base = LLM_API_BASE
+
     if not source_dir:
         print("Error: provide source_dir argument or set SOURCE_DIR env var.")
         raise typer.Exit(1)
@@ -661,7 +668,7 @@ def ingest(
         all_files = all_files[:limit]
 
     # Query model context length once before spawning workers.
-    ctx_len = get_context_length(model, LLM_API_BASE, fallback=8192)
+    ctx_len = get_context_length(model, api_base, fallback=8192)
 
     # ── Pre-filter: hash check (fast, synchronous) ─────────────────────────────
     files_to_process: list[Path] = []
@@ -681,7 +688,7 @@ def ingest(
 
     eventlog.start_run(
         model=model,
-        api_base=LLM_API_BASE,
+        api_base=api_base,
         embed_model=EMBED_MODEL,
         embed_api_base=EMBED_API_BASE,
         context_length=ctx_len,
@@ -708,7 +715,7 @@ def ingest(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_llm_phase, fp, log, index_text, model, print_lock, ctx_len): fp
+            pool.submit(_llm_phase, fp, log, index_text, model, api_base, print_lock, ctx_len): fp
             for fp in files_to_process
         }
         for future in as_completed(futures):
