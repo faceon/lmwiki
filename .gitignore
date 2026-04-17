@@ -8,9 +8,9 @@ __pycache__/
 .claude/
 
 # generated wiki outputs
-log.json
-.vectordb/
+wiki/
 
 # obsidian
 .obsidian/
 .trash/
+

@@ -11,7 +11,7 @@ import threading
 
 from openai import OpenAI
 from litellm import embedding
-from config import API_BASE, EMBED_MODEL
+from config import EMBED_API_BASE, EMBED_MODEL
 
 BATCH_SIZE = 64
 CHARS_PER_TOKEN = 1.5  # conservative for Korean-heavy text
@@ -20,8 +20,10 @@ _embed_config: dict | None = None  # {"max_chars": int, "dim": int}
 _embed_lock = threading.Lock()
 
 
-def get_context_length(model: str, api_base: str, fallback: int) -> int:
+def get_context_length(model: str, api_base: str | None, fallback: int) -> int:
     """Query LM Studio for a model's context_length. Returns fallback on any failure."""
+    if not api_base:
+        return fallback
     try:
         client = OpenAI(base_url=api_base, api_key="lm-studio")
         model_id = model.removeprefix("lm_studio/")
@@ -53,12 +55,12 @@ def _init_embed() -> dict:
             return _embed_config
 
         # 1. Context length → char limit
-        token_limit = get_context_length(EMBED_MODEL, API_BASE, fallback=512)
+        token_limit = get_context_length(EMBED_MODEL, EMBED_API_BASE, fallback=512)
         max_chars = max(int(token_limit * CHARS_PER_TOKEN) - 10, 50)
 
         # 2. Actual vector dimension via a minimal test call
         try:
-            test = embedding(model=EMBED_MODEL, input=["test"], api_base=API_BASE)
+            test = embedding(model=EMBED_MODEL, input=["test"], api_base=EMBED_API_BASE)
             dim = len(test.data[0]["embedding"])
         except Exception:
             from config import EMBED_DIM  # env-override fallback
@@ -86,7 +88,7 @@ def embed(texts: list[str]) -> list[list[float]]:
 
     for i in range(0, len(truncated), BATCH_SIZE):
         batch = truncated[i : i + BATCH_SIZE]
-        response = embedding(model=EMBED_MODEL, input=batch, api_base=API_BASE)
+        response = embedding(model=EMBED_MODEL, input=batch, api_base=EMBED_API_BASE)
         batch_results = sorted(response.data, key=lambda x: x["index"])
         results.extend(item["embedding"] for item in batch_results)
 

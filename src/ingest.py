@@ -12,7 +12,7 @@ from datetime import datetime
 import typer
 from litellm import completion
 
-from config import LLM_MODEL, INDEX_FILE, API_BASE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
+from config import LLM_MODEL, LLM_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
 from embed import embed as embed_texts, get_context_length
 from vectordb import find_related, upsert_page
 
@@ -20,10 +20,13 @@ app = typer.Typer(help="Ingest markdown files from a source directory into the w
 
 
 @app.callback()
-def _default(ctx: typer.Context):
+def _default(
+    ctx: typer.Context,
+    reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
+):
     """Run ingest when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, limit=None, workers=1)
+        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, limit=None, workers=1, reset=reset)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -360,7 +363,9 @@ def call_llm(
         else:
             print(text, end=end, flush=flush)
 
-    kwargs: dict = {"api_base": API_BASE, "model": model, "messages": messages, "temperature": 0.2, "stream": True}
+    kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2, "stream": True}
+    if LLM_API_BASE:
+        kwargs["api_base"] = LLM_API_BASE
     response = completion(**kwargs)  # type: ignore[assignment]
     full = ""
     reasoning = ""
@@ -499,6 +504,7 @@ def ingest(
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
     workers: int = typer.Option(1, help="Number of parallel LLM workers."),
+    reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
 ):
     """Ingest markdown source files into the wiki."""
     if not source_dir:
@@ -510,6 +516,24 @@ def ingest(
         print(f"Not a directory: {source_dir}")
         raise typer.Exit(1)
 
+    if reset:
+        import shutil
+        print("Resetting wiki...")
+        for d in TYPE_DIRS.values():
+            if d.exists():
+                shutil.rmtree(d)
+                print(f"  deleted {d}")
+        vectordb_dir = WIKI_DIR / ".vectordb"
+        if vectordb_dir.exists():
+            shutil.rmtree(vectordb_dir)
+            print(f"  deleted {vectordb_dir}")
+        if INDEX_FILE.exists():
+            INDEX_FILE.unlink()
+            print(f"  deleted {INDEX_FILE}")
+        if LOG_FILE.exists():
+            LOG_FILE.unlink()
+            print(f"  deleted {LOG_FILE}")
+
     for d in TYPE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)
 
@@ -520,7 +544,7 @@ def ingest(
         all_files = all_files[:limit]
 
     # Query model context length once before spawning workers.
-    ctx_len = get_context_length(model, API_BASE, fallback=8192)
+    ctx_len = get_context_length(model, LLM_API_BASE, fallback=8192)
 
     # ── Pre-filter: hash check (fast, synchronous) ─────────────────────────────
     files_to_process: list[Path] = []
