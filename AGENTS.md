@@ -1,0 +1,53 @@
+# llm-wiki
+
+Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). The agent reads this file and builds/maintains the wiki accordingly.
+
+See [SCHEMA.md](SCHEMA.md) for page structure, naming, and data schemas.
+
+## Project structure
+
+```
+scripts/  # code that operates llm-wiki
+source/   # raw source files written by humans
+wiki/     # wiki pages maintained by LLM
+├── index.md       # human-readable catalog of all pages
+├── log.json       # tracks source and wiki state
+├── concepts/      # recurring concepts across pages
+├── entities/      # people, organizations, works, etc.
+└── analyses/      # reasoning and synthesis from queries
+```
+
+## Workflow
+
+### ingest
+
+1. Read source file
+1. Check log.json for content hash — skip if unchanged
+1. Search index.md for related wiki pages — a page is related if it shares topic, entity, or concept with the source
+1. For each related page found: update frontmatter, rewrite content, append to timeline
+1. For each concept or entity in the source not covered by any existing page: create a new page, write content, append to timeline
+1. Update index.md and log.json
+
+### query
+
+1. Search index.md to find relevant pages
+1. Read those pages
+1. Synthesize answer with citations to wiki pages
+1. Save as an analysis page if the answer produces non-trivial insight or is likely to be queried again
+1. Update index.md and log.json
+
+### lint
+
+1. Find orphan pages (not referenced in any `related` field)
+1. Find missing cross-references (entity or concept mentioned in body but not in `related`)
+1. Find contradictions between pages
+1. Update affected pages
+1. Update index.md and log.json
+
+## Operating rules
+
+- **log.json**: Update after every ingest, query, and lint operation
+- **index.md**: Keep current after every wiki modification; written for human readers
+- **Timeline**: Append only — never edit past entries
+- **Source immutability**: Never modify files under `source/`
+- **Cross-links**: Use `[[Page Name]]` in body text; must match the page's filename exactly
