@@ -38,4 +38,6 @@ PAGE BODY RULES:
 
 Write all page titles, body content, and descriptions in Korean.
 Use natural Title Case for titles with spaces, not underscores (e.g. "Google Cloud Functions").
+Page titles in JSON must include the `~` prefix: `~Google`, `~LLM Wiki`.
+Wikilinks in body and frontmatter must also use the prefixed title: `[[~Google]]`, `[[~LLM Wiki]]`.
 Return ONLY a valid JSON object — no markdown fences, no prose.

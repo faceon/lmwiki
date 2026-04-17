@@ -2,10 +2,11 @@
 
 ## Naming convention
 
-- Wiki page filenames use natural Title Case: `LLM Wiki.md`, `Ingest Process.md`, `Andrej Karpathy.md`
-- Wikilinks reference the bare filename: `[[LLM Wiki]]`, `[[Andrej Karpathy]]`
-- Wikilinks in frontmatter stick to YAML syntax: `- '[[LLM Wiki]]'`, `- '[[Andrej Karpathy]]'`
-- Do not use directory paths in wikilinks: `[[source/LLM Wiki.md]]`, `[[entities/Andrej Karpathy.md]]`
+- Wiki page filenames use a `~` prefix followed by natural Title Case: `~LLM Wiki.md`, `~Andrej Karpathy.md`
+- The `~` prefix distinguishes wiki pages from source files within the same Obsidian vault
+- Wikilinks reference the full prefixed filename: `[[~LLM Wiki]]`, `[[~Andrej Karpathy]]`
+- Wikilinks in frontmatter stick to YAML syntax: `- '[[~LLM Wiki]]'`, `- '[[~Andrej Karpathy]]'`
+- Do not use directory paths in wikilinks: `[[entities/~Andrej Karpathy.md]]`
 
 ## Page structure
 
