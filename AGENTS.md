@@ -1,20 +1,24 @@
 # llm-wiki
 
-Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). The agent reads this file and builds/maintains the wiki accordingly.
-
+The agent reads this file and builds/maintains the wiki accordingly.
 See [SCHEMA.md](SCHEMA.md) for page structure, naming, and data schemas.
 
 ## Project structure
 
-```
-scripts/  # code that operates llm-wiki
-source/   # raw source files written by humans
-wiki/     # wiki pages maintained by LLM
-├── index.md       # human-readable catalog of all pages
-├── log.json       # tracks source and wiki state
-├── concepts/      # recurring concepts across pages
-├── entities/      # people, organizations, works, etc.
-└── analyses/      # reasoning and synthesis from queries
+``` markdown
+samples/          # example files for testing
+├── source/       # raw files written by humans
+└── wiki/         # wiki pages maintained by LLM
+    ├── index.md  # human-readable catalog of all pages
+    ├── log.json  # tracks source and wiki state
+    ├── concepts/ # recurring concepts across pages
+    ├── entities/ # people, organizations, works, etc.
+    └── analyses/ # reasoning and synthesis from queries
+src/              # code that operates llm-wiki
+├── config.py     # configuration and environment settings
+├── embed.py      # embedding generation
+├── ingest.py     # source ingestion pipeline
+└── vectordb.py   # vector database utilities
 ```
 
 ## Workflow

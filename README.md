@@ -2,7 +2,7 @@
 
 Inspired by [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
-Drop markdown files into `source/`. The agent reads them and builds a structured wiki of concepts, entities, and analyses — automatically cross-linked.
+Drop markdown files into `samples/source/`. The agent reads them and builds a structured wiki of concepts, entities, and analyses — automatically cross-linked.
 
 ## Setup
 
