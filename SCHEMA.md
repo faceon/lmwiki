@@ -2,11 +2,11 @@
 
 ## Naming convention
 
-- Wiki page filenames use a `~` prefix followed by natural Title Case: `~LLM Wiki.md`, `~Andrej Karpathy.md`
-- The `~` prefix distinguishes wiki pages from source files within the same Obsidian vault
-- Wikilinks reference the full prefixed filename: `[[~LLM Wiki]]`, `[[~Andrej Karpathy]]`
-- Wikilinks in frontmatter stick to YAML syntax: `- '[[~LLM Wiki]]'`, `- '[[~Andrej Karpathy]]'`
-- Do not use directory paths in wikilinks: `[[entities/~Andrej Karpathy.md]]`
+- Entity page filenames use a `@` prefix followed by natural Title Case: `@Andrej Karpathy.md`, `@Google.md`
+- Concept and analysis page filenames use natural Title Case with no prefix: `LLM Wiki.md`, `AI 기술의 이중성.md`
+- Wikilinks reference the filename stem: `[[LLM Wiki]]`, `[[@Andrej Karpathy]]`
+- Wikilinks in frontmatter stick to YAML syntax: `- '[[LLM Wiki]]'`, `- '[[@Andrej Karpathy]]'`
+- Do not use directory paths in wikilinks: `[[entities/@Andrej Karpathy.md]]`
 
 ## Page structure
 
@@ -60,7 +60,7 @@ All timestamps are local time in `YYYY-MM-DD HH:MM` format. `ingest` and `query`
     "Karpathy Gist.md": {
       "hash": "<sha256>",
       "ingested_at": "2026-04-15 10:00",
-      "pages": ["LLM Wiki.md", "Andrej Karpathy.md"],
+      "pages": ["LLM Wiki.md", "@Andrej Karpathy.md"],
       "time_taken": "30s"
     }
   },

@@ -56,4 +56,4 @@ src/              # code that operates llm-wiki
 - **index.md**: Keep current after every wiki modification; written for human readers
 - **Timeline**: Append only — never edit past entries
 - **Source immutability**: Never modify files under `source/`
-- **Cross-links**: Use `[[~Page Name]]` in body text; must match the page's filename exactly (including `~` prefix)
+- **Cross-links**: Use `[[Page Name]]` in body text; must match the page's filename stem exactly — entities include the `@` prefix (e.g. `[[@Andrej Karpathy]]`), concepts and analyses do not
