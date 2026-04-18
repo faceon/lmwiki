@@ -1,6 +1,6 @@
 ---
 type: journal
-date: 2025-11-23
+date: 2026-04-18
 tags: [soccer, sports, weekend]
 ---
 

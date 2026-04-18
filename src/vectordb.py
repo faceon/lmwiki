@@ -142,13 +142,6 @@ def _bm25_rank(all_pages: dict[str, str], query: str, limit: int) -> list[str]:
     raw = bm25.get_scores(_tokenize(query))
     max_score = max(raw) if any(s > 0 for s in raw) else 1.0
 
-    # Filter out pure noise distribution (stopwords dominating)
-    if len(raw) >= 3:
-        sorted_raw = sorted(raw)
-        noise_floor = sum(sorted_raw[:len(raw)//2]) / max(1, len(raw)//2)
-        if max_score < noise_floor * 1.5:
-            return []
-
     ranked = sorted(range(len(raw)), key=lambda i: raw[i], reverse=True)
     # Only consider entries with positive score, up to limit
     candidates = [i for i in ranked[:limit] if raw[i] > 0]
@@ -189,8 +182,8 @@ def find_related(
     all_pages: dict[str, str],
     source_text: str,
     n: int = 10,
-    vec_distance_cap: float = 0.65,
-    rrf_min_score: float = 0.9,
+    vec_distance_cap: float = 0.8,
+    rrf_min_score: float = 0.5,
     embed_fn: EmbedFn | None = None,
 ) -> dict[str, tuple[str, float]]:
     """Hybrid search: vector + BM25 (each pre-filtered) → RRF → top N pages.
@@ -210,10 +203,12 @@ def find_related(
     # ── vector — filtered by cosine distance ──────────────────────────────────
     vec_titles: list[str] = []
     vec_sims: dict[str, float] = {}
+    vec_search_ran = False
     if embed_fn is not None:
         try:
             table = get_table()
             if table.count_rows() > 0:
+                vec_search_ran = True
                 query_vec = embed_fn([source_text[:_get_embed_max_chars()]])[0]
                 rows = table.search(query_vec).limit(inner_limit).to_list()
 
@@ -244,14 +239,18 @@ def find_related(
     fused_scores = _rrf_fuse_with_scores(lists)
 
     fused_items = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
-    # A highly restrictive RRF threshold (s >= 0.90) guarantees we only pull:
-    # 1. The top ~6 of a single list (60/(60+6) = 0.909), naturally avoiding the max cap.
-    # 2. Exclusively overlaps, if any overlap exists (as single items score ~0.5 relative to overlap).
     candidates = [(t, s) for t, s in fused_items if s >= rrf_min_score]
+
+    # If vector search ran, require a vector match for inclusion.
+    # Falls back to BM25-only when vector search was unavailable entirely.
+    require_vec = vec_search_ran
 
     result: dict[str, tuple[str, float]] = {}
     for t, rrf_score in candidates[:n]:
-        if t in all_pages:
-            score = vec_sims.get(t, rrf_score)
-            result[t] = (all_pages[t][:1500], score)
+        if t not in all_pages:
+            continue
+        if require_vec and t not in vec_sims:
+            continue
+        score = vec_sims.get(t, 0.0)
+        result[t] = (all_pages[t][:1500], score)
     return result

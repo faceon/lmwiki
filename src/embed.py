@@ -24,12 +24,24 @@ def get_context_length(model: str, api_base: str | None, fallback: int) -> int:
     """Query LM Studio for a model's context_length. Returns fallback on any failure."""
     if not api_base:
         return fallback
+    model_id = model.removeprefix("lm_studio/")
+    # LM Studio native API exposes loaded_context_length accurately
+    try:
+        import urllib.request, json as _json
+        base = api_base.rstrip("/").removesuffix("/v1")
+        with urllib.request.urlopen(f"{base}/api/v0/models", timeout=3) as r:
+            for m in _json.loads(r.read())["data"]:
+                if m["id"] == model_id or model_id in m["id"] or m["id"] in model_id:
+                    ctx = m.get("loaded_context_length") or m.get("max_context_length")
+                    if ctx:
+                        return int(ctx)
+    except Exception:
+        pass
+    # Fallback: OpenAI-compatible /v1/models (older LM Studio versions)
     try:
         client = OpenAI(base_url=api_base, api_key="lm-studio")
-        model_id = model.removeprefix("lm_studio/")
         for m in client.models.list().data:
             if m.id == model_id or model_id in m.id or m.id in model_id:
-                # Pydantic v2 stores unknown fields in model_extra; fall back to getattr
                 extra = getattr(m, "model_extra", None) or {}
                 ctx = extra.get("context_length") or getattr(m, "context_length", None)
                 if ctx:

@@ -500,9 +500,10 @@ def call_llm(
         rc = getattr(delta, "reasoning_content", None)
         if rc:
             if not thinking:
-                emit("  Thinking", end="", flush=True)
                 if live_status:
-                    live_status("thinking...")
+                    live_status("thinking...", True)
+                else:
+                    emit("  thinking...", flush=True)
                 thinking = True
                 thinking_start = time.monotonic()
             prev_len = len(reasoning)
@@ -528,9 +529,10 @@ def call_llm(
         if not was_inline and inline_thinking:
             # Just entered an inline thinking block.
             if not thinking:
-                emit("  Thinking", end="", flush=True)
                 if live_status:
-                    live_status("thinking...")
+                    live_status("thinking...", True)
+                else:
+                    emit("  thinking...", flush=True)
                 thinking = True
                 thinking_start = time.monotonic()
             continue
@@ -539,9 +541,9 @@ def call_llm(
             # Just exited inline thinking block.
             elapsed = time.monotonic() - thinking_start
             thinking_total += elapsed
-            emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
+            print(f"\n  ({elapsed:.1f}s)", flush=True)
             if live_status:
-                live_status("output 생성 중...")
+                live_status("generating...", True)
             thinking = False
             if output_start is None:
                 output_start = time.monotonic()
@@ -565,16 +567,17 @@ def call_llm(
         if thinking:
             elapsed = time.monotonic() - thinking_start
             thinking_total += elapsed
-            emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
+            print(f"\n  ({elapsed:.1f}s)", flush=True)
             if live_status:
-                live_status("output 생성 중...")
+                live_status("generating...", True)
             thinking = False
             if output_start is None:
                 output_start = time.monotonic()
         elif not full:
-            emit("  Output: ", end="", flush=True)
             if live_status:
-                live_status("output 생성 중...")
+                live_status("generating...", True)
+            else:
+                emit("  generating...", flush=True)
             if output_start is None:
                 output_start = time.monotonic()
         full += c
@@ -612,7 +615,6 @@ def extract_json(text: str) -> tuple[dict, bool]:
 
 def _llm_phase(
     filepath: Path,
-    log: dict,
     index_text: str,
     model: str,
     api_base: Optional[str],
@@ -629,8 +631,6 @@ def _llm_phase(
 
     file_hash = get_file_hash(filepath)
 
-    print(f"  {filepath.name} 처리 시작...", flush=True)
-
     source_text = filepath.read_text(encoding="utf-8")
     _, source_body = parse_frontmatter(source_text)
 
@@ -645,19 +645,15 @@ def _llm_phase(
 
     related = find_related(all_pages, source_body, n=10, embed_fn=embed_texts)
 
-    buf.append(f"  Calling {model} ...")
-
-    name = filepath.name
-
     def live_status(msg: str, overwrite: bool = False) -> None:
-        line = f"  [{name}] {msg:<50}"
+        line = f"  {msg:<60}"
         if overwrite:
             print(f"\r{line}", end="", flush=True)
         else:
             print(f"\r{line}", flush=True)
 
-    titles_inline = ", ".join(f"{t}({s:.0%})" for t, (_, s) in related.items()) if related else "none"
-    live_status(f"LLM에 {len(related)} 개의 페이지를 제공하며 처리 중... ({titles_inline})")
+    ctx_summary = ", ".join(f"{t}({s:.0%})" for t, (_, s) in related.items()) if related else "No related document"
+    live_status(f"context {len(related)}p: {ctx_summary}")
 
     prompt = build_prompt(rel, source_text, index_text, related, context_length)
     try:
@@ -673,9 +669,11 @@ def _llm_phase(
         )
         if not result["text"].strip():
             raise ValueError("LLM returned empty response")
+        print()  # close the overwrite status line
         data, json_repair_used = extract_json(result["text"])
     except Exception as e:
         error_msg = str(e)
+        print()
         live_status(f"오류: {error_msg}")
         buf.append(f"  Error: {error_msg}")
         eventlog.emit(
@@ -824,7 +822,7 @@ def ingest(
         index_text = load_index()
 
         try:
-            result = _llm_phase(fp, log, index_text, model, api_base, ctx_len)
+            result = _llm_phase(fp, index_text, model, api_base, ctx_len)
         except Exception as e:
             error_msg = str(e)
             print(f"  Unexpected error: {error_msg}")
