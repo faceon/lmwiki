@@ -182,8 +182,8 @@ def find_related(
     all_pages: dict[str, str],
     source_text: str,
     n: int = 10,
-    vec_distance_cap: float = 1.0,
-    rrf_min_score: float = 0.5,
+    vec_distance_cap: float = 1.2,
+    rrf_min_score: float = 0.6,
     embed_fn: EmbedFn | None = None,
 ) -> dict[str, tuple[str, float]]:
     """Hybrid search: vector + BM25 (each pre-filtered) → RRF → top N pages.
@@ -241,8 +241,6 @@ def find_related(
     fused_items = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
     candidates = [(t, s) for t, s in fused_items if s >= rrf_min_score]
 
-    # If vector search ran, require a vector match for inclusion.
-    # Falls back to BM25-only when vector search was unavailable entirely.
     require_vec = vec_search_ran
 
     result: dict[str, tuple[str, float]] = {}
@@ -251,6 +249,6 @@ def find_related(
             continue
         if require_vec and t not in vec_sims:
             continue
-        score = vec_sims.get(t, 0.0)
+        score = vec_sims.get(t, rrf_score)
         result[t] = (all_pages[t][:1500], score)
     return result
