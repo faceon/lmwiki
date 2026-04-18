@@ -12,3 +12,8 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "json-repair>=0.59.4",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.11",
+]

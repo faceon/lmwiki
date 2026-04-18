@@ -25,7 +25,6 @@ SYSTEM_PROMPT = _SYSTEM_PROMPT_FILE.read_text(encoding="utf-8").strip()
 _USER_TEMPLATE = _USER_PROMPT_FILE.read_text(encoding="utf-8")
 
 def _prompt_hash(path: Path) -> str:
-    import hashlib
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
 
 _PROMPT_HASHES = {
@@ -39,13 +38,12 @@ def _default(
     ctx: typer.Context,
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
     remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
-    workers: int = typer.Option(4, help="Number of parallel LLM workers."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
 ):
     """Ingest markdown source files into the wiki."""
     if ctx.invoked_subcommand is None:
-        ingest(source_dir=str(SOURCE_DIR), model=model, remote=remote, limit=limit, workers=workers, reset=reset)
+        ingest(source_dir=str(SOURCE_DIR), model=model, remote=remote, limit=limit, reset=reset)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -232,7 +230,7 @@ def read_page(title: str) -> Optional[tuple[dict, str, list[str]]]:
 
     if "\n## Timeline\n" in rest:
         body, tl = rest.split("\n## Timeline\n", 1)
-        timeline = [l for l in tl.strip().splitlines() if l.startswith("- ")]
+        timeline = [line for line in tl.strip().splitlines() if line.startswith("- ")]
     else:
         body, timeline = rest, []
     return meta, body.strip(), timeline
@@ -282,9 +280,9 @@ def rebuild_index():
             if "\n## Timeline\n" in body:
                 body = body.split("\n## Timeline\n")[0]
             desc = next(
-                (re.sub(r"\[\[([^\]]+)\]\]", r"\1", l).strip()[:120]
-                 for l in body.splitlines()
-                 if l.strip() and not l.startswith("#")),
+                (re.sub(r"\[\[([^\]]+)\]\]", r"\1", line).strip()[:120]
+                 for line in body.splitlines()
+                 if line.strip() and not line.startswith("#")),
                 "",
             )
             sections[page_type].append((title, desc))
@@ -557,11 +555,10 @@ def _llm_phase(
     index_text: str,
     model: str,
     api_base: Optional[str],
-    print_lock: threading.Lock,
     context_length: int = 8192,
 ) -> Optional[tuple[Path, Optional[str], Optional[dict], list[str], Optional[str], dict]]:
-    """Hash-check and LLM call for one file. Thread-safe (read-only wiki access).
-
+    """Hash-check and LLM call for one file.
+    
     Returns (filepath, file_hash, llm_data, output_lines, error, related) or None if skipped.
     error is None on success, error message string on failure.
     related is the hybrid-search result — forwarded to Phase 2 for merge-rule checks.
@@ -571,8 +568,7 @@ def _llm_phase(
 
     file_hash = get_file_hash(filepath)
 
-    with print_lock:
-        print(f"  → {filepath.name} 처리 시작...", flush=True)
+    print(f"  → {filepath.name} 처리 시작...", flush=True)
 
     source_text = filepath.read_text(encoding="utf-8")
     _, source_body = parse_frontmatter(source_text)
@@ -593,12 +589,11 @@ def _llm_phase(
     name = filepath.name
 
     def live_status(msg: str, overwrite: bool = False) -> None:
-        with print_lock:
-            line = f"  [{name}] {msg:<50}"
-            if overwrite:
-                print(f"\r{line}", end="", flush=True)
-            else:
-                print(f"\r{line}", flush=True)
+        line = f"  [{name}] {msg:<50}"
+        if overwrite:
+            print(f"\r{line}", end="", flush=True)
+        else:
+            print(f"\r{line}", flush=True)
 
     titles_inline = ", ".join(f"{t}({s:.0%})" for t, (_, s) in related.items()) if related else "none"
     live_status(f"LLM 호출 중... ({len(related)} pages: {titles_inline})")
@@ -663,7 +658,6 @@ def ingest(
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
     remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
-    workers: int = typer.Option(4, help="Number of parallel LLM workers."),
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
 ):
     """Ingest markdown source files into the wiki."""
@@ -725,7 +719,7 @@ def ingest(
     n_skip  = len(skipped)
     n_proc  = len(files_to_process)
     print(f"Found {n_total} file(s): {n_proc} to process, {n_skip} unchanged. "
-          f"Workers: {workers}. Context: {ctx_len:,} tokens.")
+          f"Context: {ctx_len:,} tokens.")
 
     eventlog.start_run(
         model=model,
@@ -733,7 +727,7 @@ def ingest(
         embed_model=EMBED_MODEL,
         embed_api_base=EMBED_API_BASE,
         context_length=ctx_len,
-        workers=workers,
+        workers=1,
         n_files_total=n_total,
         n_files_skipped=n_skip,
         n_files_to_process=n_proc,
@@ -749,7 +743,6 @@ def ingest(
     # ── Process files sequentially: LLM → write → rebuild index → next file ─────
     # Each file sees wiki pages written by previous files, enabling cross-file
     # awareness and proper merge/update decisions.
-    print_lock = threading.Lock()
     processed = 0
     n_new_total = 0
     n_updated_total = 0
@@ -762,7 +755,7 @@ def ingest(
         index_text = load_index()
 
         try:
-            result = _llm_phase(fp, log, index_text, model, api_base, print_lock, ctx_len)
+            result = _llm_phase(fp, log, index_text, model, api_base, ctx_len)
         except Exception as e:
             error_msg = str(e)
             print(f"  Unexpected error: {error_msg}")

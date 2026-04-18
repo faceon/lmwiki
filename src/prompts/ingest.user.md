@@ -1,11 +1,13 @@
-Source: {source_path}
+## Source Path
+{source_path}
 
-## Source content
+## Source Content
 {source_content}
 
-## Current wiki index
+## Current Wiki Index
 {index_content}
 {related_section}
+
 ## Instructions
 - Pages with similarity ≥ 60%: put in updated_pages (do NOT create a new page for the same topic)
 - Pages with similarity < 40% and no related page: put in new_pages
