@@ -78,13 +78,18 @@ def _init_embed() -> dict:
             from config import EMBED_DIM  # env-override fallback
             dim = EMBED_DIM
 
-        _embed_config = {"max_chars": max_chars, "dim": dim}
+        _embed_config = {"max_chars": max_chars, "dim": dim, "tokens": token_limit}
     return _embed_config
 
 
 def embed_max_chars() -> int:
     """Max chars per text based on the embedding model's context window."""
     return _init_embed()["max_chars"]
+
+
+def embed_ctx_tokens() -> int:
+    """Token context length of the embedding model, as reported by the API."""
+    return _init_embed()["tokens"]
 
 
 def embed_dim() -> int:

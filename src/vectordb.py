@@ -182,7 +182,7 @@ def find_related(
     all_pages: dict[str, str],
     source_text: str,
     n: int = 10,
-    vec_distance_cap: float = 0.8,
+    vec_distance_cap: float = 1.0,
     rrf_min_score: float = 0.5,
     embed_fn: EmbedFn | None = None,
 ) -> dict[str, tuple[str, float]]:

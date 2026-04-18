@@ -12,7 +12,7 @@ import typer
 from litellm import completion
 
 from config import LOCAL_LLM_MODEL, LOCAL_LLM_API_BASE, REMOTE_LLM_MODEL, EMBED_MODEL, EMBED_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
-from embed import embed as embed_texts, get_context_length
+from embed import embed as embed_texts, get_context_length, embed_ctx_tokens
 from vectordb import find_related, upsert_page
 import eventlog
 
@@ -768,6 +768,9 @@ def ingest(
 
     # Query model context length once before spawning workers.
     ctx_len = get_context_length(model, api_base, fallback=8192)
+    embed_tokens = embed_ctx_tokens()
+    print(f"LLM:   {model} @ {api_base or '(remote)'} — {ctx_len:,} tokens")
+    print(f"Embed: {EMBED_MODEL} @ {EMBED_API_BASE} — {embed_tokens:,} tokens")
 
     # ── Pre-filter: hash check (fast, synchronous) ─────────────────────────────
     files_to_process: list[Path] = []
