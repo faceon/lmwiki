@@ -34,14 +34,18 @@ _PROMPT_HASHES = {
 }
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def _default(
     ctx: typer.Context,
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
+    remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
+    workers: int = typer.Option(4, help="Number of parallel LLM workers."),
+    limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
+    model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
 ):
-    """Run ingest when no subcommand is given."""
+    """Ingest markdown source files into the wiki."""
     if ctx.invoked_subcommand is None:
-        ingest(source_dir=str(SOURCE_DIR), model=LLM_MODEL, api_base=None, limit=None, workers=1, reset=reset)
+        ingest(source_dir=str(SOURCE_DIR), model=model, remote=remote, limit=limit, workers=workers, reset=reset)
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -97,7 +101,7 @@ def source_title(filepath: Path) -> str:
     (SCHEMA.md) uses natural Title Case with spaces, so separators are replaced.
     The source file itself is not renamed.
     """
-    return filepath.stem.replace("_", " ").replace("-", " ").strip()
+    return filepath.stem
 
 # ── log ────────────────────────────────────────────────────────────────────────
 
@@ -170,6 +174,28 @@ def _safe_filename(title: str) -> str:
     """Replace filesystem-unsafe characters so any title can be a valid filename."""
     return re.sub(r'[/\\:*?"<>|]', '-', title).strip('-').strip()
 
+def _strip_prefix(title: str) -> str:
+    return re.sub(r'^[~@]+', '', title).replace("_", " ").strip()
+
+def _normalize_title(title: str, page_type: str = "concept") -> str:
+    """Normalize a page title: strip any prefix/underscores, add @ for entities only."""
+    bare = _strip_prefix(title)
+    return f"@{bare}" if page_type == "entity" else bare
+
+def _autocorrect_wikilinks(body: str, known_titles: set[str]) -> str:
+    """Fix wikilinks in body: resolve correct prefix, strip dangling refs."""
+    def fix(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        bare = _strip_prefix(inner)
+        for candidate in dict.fromkeys([inner, f"@{bare}", bare]):
+            if candidate in known_titles or find_page_path(candidate):
+                return f"[[{candidate}]]"
+        # Preserve source file references as-is (original filename with underscores)
+        if (SOURCE_DIR / f"{inner}.md").exists():
+            return f"[[{inner}]]"
+        return inner  # dangling — strip brackets, preserve original text
+    return re.sub(r"\[\[([^\[\]]+)\]\]", fix, body)
+
 def _strip_duplicate_h1(body: str, title: str) -> str:
     """Strip a leading `# Title` H1 that duplicates the page title.
 
@@ -187,11 +213,13 @@ def _strip_duplicate_h1(body: str, title: str) -> str:
     return body
 
 def find_page_path(title: str) -> Optional[Path]:
-    safe = _safe_filename(title)
-    for d in TYPE_DIRS.values():
-        p = d / f"{safe}.md"
-        if p.exists():
-            return p
+    bare = _strip_prefix(title)
+    for candidate in dict.fromkeys([title, f"@{bare}", bare]):
+        safe = _safe_filename(candidate)
+        for d in TYPE_DIRS.values():
+            p = d / f"{safe}.md"
+            if p.exists():
+                return p
     return None
 
 def read_page(title: str) -> Optional[tuple[dict, str, list[str]]]:
@@ -632,14 +660,13 @@ def ingest(
         str(SOURCE_DIR), help="Source directory path."
     ),
     model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
-    api_base: Optional[str] = typer.Option(None, "--api-base", help="LLM API base URL. Overrides LLM_API_BASE env var."),
+    remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
-    workers: int = typer.Option(1, help="Number of parallel LLM workers."),
+    workers: int = typer.Option(4, help="Number of parallel LLM workers."),
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
 ):
     """Ingest markdown source files into the wiki."""
-    if api_base is None:
-        api_base = LLM_API_BASE
+    api_base = None if remote else LLM_API_BASE
 
     if not source_dir:
         print("Error: provide source_dir argument or set SOURCE_DIR env var.")
@@ -784,13 +811,23 @@ def ingest(
         page_names_created: list[str] = []
         touched: list[str] = []
 
+        # Pre-collect normalized new page titles for wikilink correction
+        new_titles_set: set[str] = {
+            _normalize_title(
+                (p.get("title") or "").strip(),
+                p.get("type", "concept") if p.get("type") in TYPE_DIRS else "concept",
+            )
+            for p in data.get("new_pages", [])
+            if (p.get("title") or "").strip()
+        }
+
         # Create new pages
         for page in data.get("new_pages", []):
             ptype = page.get("type", "concept")
             if ptype not in TYPE_DIRS:
                 ptype = "concept"
-            title = (page.get("title") or "").strip()
-            body = (page.get("body") or "").strip()
+            title = _normalize_title((page.get("title") or "").strip(), ptype)
+            body = _autocorrect_wikilinks((page.get("body") or "").strip(), new_titles_set)
             if not title or not body:
                 continue
 
@@ -817,12 +854,19 @@ def ingest(
 
         # Update existing pages
         for page in data.get("updated_pages", []):
-            title = (page.get("title") or "").strip()
-            new_body = (page.get("body") or "").strip()
+            title_raw = (page.get("title") or "").strip()
+            new_body = _autocorrect_wikilinks((page.get("body") or "").strip(), new_titles_set)
             tag = page.get("timeline_tag", "[refined]")
             detail = page.get("timeline_detail", "updated")
-            if not title or not new_body:
+            if not title_raw or not new_body:
                 continue
+
+            # Resolve actual title from filesystem (handles prefix variants)
+            page_path = find_page_path(title_raw)
+            if not page_path:
+                title = title_raw
+            else:
+                title = page_path.stem
 
             existing = read_page(title)
             if not existing:

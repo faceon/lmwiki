@@ -16,7 +16,7 @@ Return JSON with this exact structure:
   "new_pages": [
     {
       "type": "concept OR entity",
-      "title": "~ prefixed Title Case name (e.g. ~Google, ~LLM Wiki)",
+      "title": "Title Case name — entities get @ prefix (e.g. @Google), concepts have none (e.g. LLM Wiki)",
       "body": "full markdown body — use [[Wikilinks]] for cross-references",
       "description": "one-line description for the index"
     }

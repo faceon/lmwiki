@@ -6,7 +6,7 @@ load_dotenv()
 
 SOURCE_DIR = Path(os.getenv("SOURCE_DIR", "samples/source"))
 WIKI_DIR = Path(os.getenv("WIKI_DIR", "samples/wiki"))
-LLM_API_BASE = os.getenv("LLM_API_BASE") or None     # None = let LiteLLM route internally (cloud providers)
+LLM_API_BASE = os.getenv("LLM_API_BASE", "http://localhost:1234/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "lm_studio/google/gemma-4-26b-a4b")
 EMBED_API_BASE = os.getenv("EMBED_API_BASE", "http://localhost:1234/v1")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "lm_studio/text-embedding-kure-v1")
