@@ -577,13 +577,14 @@ def _llm_phase(
     source_text = filepath.read_text(encoding="utf-8")
     _, source_body = parse_frontmatter(source_text)
 
-    # Load all wiki pages for hybrid search
+    # Load all wiki pages for hybrid search — scan dirs directly (index may be stale or absent)
     all_pages: dict[str, str] = {}
-    for title in wikilinks_in(index_text):
-        result = read_page(title)
-        if result:
-            _, body, _ = result
-            all_pages[title] = body
+    for d in TYPE_DIRS.values():
+        for p in sorted(d.glob("*.md")):
+            result = read_page(p.stem)
+            if result:
+                _, body, _ = result
+                all_pages[p.stem] = body
 
     related = find_related(all_pages, source_body, n=10, embed_fn=embed_texts)
 
@@ -703,7 +704,7 @@ def ingest(
 
     log = load_log()
     log["errors"] = []  # reset each run — errors reflect only the most recent run
-    all_files = sorted(src.rglob("*.md"))
+    all_files = sorted(src.rglob("*.md"), key=source_date)
     if limit:
         all_files = all_files[:limit]
 
@@ -745,64 +746,58 @@ def ingest(
         print("Nothing to do.")
         return
 
-    # Snapshot index once — all workers share the same starting state.
-    index_text = load_index()
-
-    # ── Phase 1: LLM calls (parallel) ─────────────────────────────────────────
-    results: list[tuple[Path, str, dict, list[str], None, dict]] = []
+    # ── Process files sequentially: LLM → write → rebuild index → next file ─────
+    # Each file sees wiki pages written by previous files, enabling cross-file
+    # awareness and proper merge/update decisions.
     print_lock = threading.Lock()
-    completed = 0
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_llm_phase, fp, log, index_text, model, api_base, print_lock, ctx_len): fp
-            for fp in files_to_process
-        }
-        for future in as_completed(futures):
-            fp = futures[future]
-            completed += 1
-            print(f"\n[{completed}/{n_proc}] ── {fp.name} ──")
-            try:
-                result = future.result()
-            except Exception as e:
-                error_msg = str(e)
-                print(f"  Unexpected error: {error_msg}")
-                log["errors"].append({
-                    "file": str(fp),
-                    "error": error_msg,
-                    "phase": "llm",
-                    "timestamp": now(),
-                })
-                eventlog.emit(
-                    "error",
-                    file=str(fp),
-                    phase="worker",
-                    error=error_msg,
-                    exception=type(e).__name__,
-                )
-                continue
-            if result is None:
-                continue
-            _, file_hash, data, buf, error, _related = result
-            for line in buf:
-                print(line)
-            if error is not None:
-                log["errors"].append({
-                    "file": str(fp),
-                    "error": error,
-                    "phase": "llm",
-                    "timestamp": now(),
-                })
-                continue
-            results.append(result)
-
-    # ── Phase 2: write pages (sequential) ─────────────────────────────────────
     processed = 0
     n_new_total = 0
     n_updated_total = 0
     n_merge_violations_total = 0
-    for filepath, file_hash, data, _, _err, related in results:
-        if not data:  # unchanged file
+
+    for i, fp in enumerate(files_to_process):
+        print(f"\n[{i + 1}/{n_proc}] ── {fp.name} ──")
+
+        # Reload index each time so this file sees pages from previous files.
+        index_text = load_index()
+
+        try:
+            result = _llm_phase(fp, log, index_text, model, api_base, print_lock, ctx_len)
+        except Exception as e:
+            error_msg = str(e)
+            print(f"  Unexpected error: {error_msg}")
+            log["errors"].append({
+                "file": str(fp),
+                "error": error_msg,
+                "phase": "llm",
+                "timestamp": now(),
+            })
+            eventlog.emit(
+                "error",
+                file=str(fp),
+                phase="worker",
+                error=error_msg,
+                exception=type(e).__name__,
+            )
+            continue
+
+        if result is None:
+            continue
+
+        filepath, file_hash, data, buf, error, related = result
+        for line in buf:
+            print(line)
+
+        if error is not None:
+            log["errors"].append({
+                "file": str(fp),
+                "error": error,
+                "phase": "llm",
+                "timestamp": now(),
+            })
+            continue
+
+        if not data:
             continue
 
         rel = str(filepath)
@@ -944,8 +939,11 @@ def ingest(
         n_new_total += len(page_names_created)
         n_updated_total += len(touched)
 
-    if processed:
+        # Rebuild index immediately so the next file sees these new pages.
         rebuild_index()
+        save_log(log)
+
+    if processed:
         log["orphans"] = collect_orphan_wikilinks()
         if log["orphans"]:
             sample = ", ".join(
@@ -953,8 +951,6 @@ def ingest(
             )
             more = "" if len(log["orphans"]) <= 3 else f", +{len(log['orphans']) - 3} more"
             print(f"  {len(log['orphans'])} orphan wikilink(s): {sample}{more}")
-
-    if processed or log["errors"]:
         save_log(log)
 
     if log["errors"]:
