@@ -11,7 +11,7 @@ from datetime import datetime
 import typer
 from litellm import completion
 
-from config import LLM_MODEL, LLM_API_BASE, EMBED_MODEL, EMBED_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
+from config import LOCAL_LLM_MODEL, LOCAL_LLM_API_BASE, REMOTE_LLM_MODEL, EMBED_MODEL, EMBED_API_BASE, INDEX_FILE, LOG_FILE, SOURCE_DIR, TYPE_DIRS, WIKI_DIR
 from embed import embed as embed_texts, get_context_length
 from vectordb import find_related, upsert_page
 import eventlog
@@ -39,7 +39,7 @@ def _default(
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
     remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
-    model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
+    model: str = typer.Option("", help="LiteLLM model string override (default: auto from --remote)."),
 ):
     """Ingest markdown source files into the wiki."""
     if ctx.invoked_subcommand is None:
@@ -473,14 +473,24 @@ def call_llm(
         else:
             print(text, end=end, flush=flush)
 
-    kwargs: dict = {"model": model, "messages": messages, "temperature": 0.2, "stream": True}
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": True,
+    }
     if api_base:
         kwargs["api_base"] = api_base
+    else:
+        kwargs["response_format"] = {"type": "json_object"}
     total_start = time.monotonic()
     response = completion(**kwargs)  # type: ignore[assignment]
     full = ""
     reasoning = ""
-    thinking = False
+    thinking = False           # reasoning_content or inline thinking indicator active
+    inline_thinking = False    # inside <|channel>thought ... <|channel> block
+    _ith_opens = 0             # cumulative <|channel>thought count
+    _ith_closes = 0            # cumulative <|channel> (non-thought) count
     thinking_start = 0.0
     thinking_total = 0.0
     output_start: Optional[float] = None
@@ -502,24 +512,73 @@ def call_llm(
                 live_status(f"thinking... {elapsed:.1f}s", True)
             continue
         c = delta.content
-        if c:
-            if thinking:
-                elapsed = time.monotonic() - thinking_start
-                thinking_total += elapsed
-                emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
+        if not c:
+            continue
+
+        # Detect inline thinking blocks emitted as regular content (e.g. Gemma 4:
+        # <|channel>thought ... <|channel>). Count open/close tags incrementally.
+        new_opens = c.count("<|channel>thought")
+        new_closes = c.count("<|channel>") - new_opens
+        _ith_opens += new_opens
+        _ith_closes += new_closes
+
+        was_inline = inline_thinking
+        inline_thinking = _ith_opens > _ith_closes
+
+        if not was_inline and inline_thinking:
+            # Just entered an inline thinking block.
+            if not thinking:
+                emit("  Thinking", end="", flush=True)
                 if live_status:
-                    live_status("output 생성 중...")
-                thinking = False
-                if output_start is None:
-                    output_start = time.monotonic()
-            elif not full:
-                emit("  Output: ", end="", flush=True)
-                if live_status:
-                    live_status("output 생성 중...")
-                if output_start is None:
-                    output_start = time.monotonic()
-            full += c
-            emit(c, end="", flush=True)
+                    live_status("thinking...")
+                thinking = True
+                thinking_start = time.monotonic()
+            continue
+
+        if was_inline and not inline_thinking:
+            # Just exited inline thinking block.
+            elapsed = time.monotonic() - thinking_start
+            thinking_total += elapsed
+            emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
+            if live_status:
+                live_status("output 생성 중...")
+            thinking = False
+            if output_start is None:
+                output_start = time.monotonic()
+            # Keep only the content that follows the closing tag in this chunk.
+            close_tag = "<|channel>"
+            idx = c.rfind(close_tag)
+            if idx != -1:
+                after = c[idx + len(close_tag):]
+                c = after if not after.lstrip().startswith("thought") else ""
+            else:
+                c = ""
+            if c:
+                full += c
+                emit(c, end="", flush=True)
+            continue
+
+        if inline_thinking:
+            continue  # suppress thinking content
+
+        # Normal (non-thinking) content.
+        if thinking:
+            elapsed = time.monotonic() - thinking_start
+            thinking_total += elapsed
+            emit(f" ({elapsed:.1f}s)\n  Output: ", end="", flush=True)
+            if live_status:
+                live_status("output 생성 중...")
+            thinking = False
+            if output_start is None:
+                output_start = time.monotonic()
+        elif not full:
+            emit("  Output: ", end="", flush=True)
+            if live_status:
+                live_status("output 생성 중...")
+            if output_start is None:
+                output_start = time.monotonic()
+        full += c
+        emit(c, end="", flush=True)
     emit("")
     total_end = time.monotonic()
     return {
@@ -531,6 +590,8 @@ def call_llm(
 
 def extract_json(text: str) -> tuple[dict, bool]:
     """Return (parsed, repair_used). repair_used is True if json_repair was needed."""
+    # Strip inline thinking blocks that some models emit in the content stream.
+    text = re.sub(r"<\|channel\>thought.*?<\|channel\>", "", text, flags=re.DOTALL)
     m = re.search(r"\{.*\}", text, re.DOTALL)
     raw = m.group(0) if m else text
     try:
@@ -568,7 +629,7 @@ def _llm_phase(
 
     file_hash = get_file_hash(filepath)
 
-    print(f"  → {filepath.name} 처리 시작...", flush=True)
+    print(f"  {filepath.name} 처리 시작...", flush=True)
 
     source_text = filepath.read_text(encoding="utf-8")
     _, source_body = parse_frontmatter(source_text)
@@ -596,7 +657,7 @@ def _llm_phase(
             print(f"\r{line}", flush=True)
 
     titles_inline = ", ".join(f"{t}({s:.0%})" for t, (_, s) in related.items()) if related else "none"
-    live_status(f"LLM 호출 중... ({len(related)} pages: {titles_inline})")
+    live_status(f"LLM에 {len(related)} 개의 페이지를 제공하며 처리 중... ({titles_inline})")
 
     prompt = build_prompt(rel, source_text, index_text, related, context_length)
     try:
@@ -610,6 +671,8 @@ def _llm_phase(
             buf=buf,
             live_status=live_status,
         )
+        if not result["text"].strip():
+            raise ValueError("LLM returned empty response")
         data, json_repair_used = extract_json(result["text"])
     except Exception as e:
         error_msg = str(e)
@@ -655,13 +718,18 @@ def ingest(
     source_dir: Optional[str] = typer.Argument(
         str(SOURCE_DIR), help="Source directory path."
     ),
-    model: str = typer.Option(LLM_MODEL, help="LiteLLM model string."),
+    model: str = typer.Option("", help="LiteLLM model string override (default: auto from --remote)."),
     remote: bool = typer.Option(False, "--remote", help="Use remote (cloud) LLM instead of localhost."),
     limit: Optional[int] = typer.Option(None, help="Cap number of files to process."),
     reset: bool = typer.Option(False, "--reset/--no-reset", help="Delete all wiki pages and vector DB before ingesting."),
 ):
     """Ingest markdown source files into the wiki."""
-    api_base = None if remote else LLM_API_BASE
+    if remote:
+        model = model or REMOTE_LLM_MODEL
+        api_base = None
+    else:
+        model = model or LOCAL_LLM_MODEL
+        api_base = LOCAL_LLM_API_BASE
 
     if not source_dir:
         print("Error: provide source_dir argument or set SOURCE_DIR env var.")
@@ -699,8 +767,6 @@ def ingest(
     log = load_log()
     log["errors"] = []  # reset each run — errors reflect only the most recent run
     all_files = sorted(src.rglob("*.md"), key=source_date)
-    if limit:
-        all_files = all_files[:limit]
 
     # Query model context length once before spawning workers.
     ctx_len = get_context_length(model, api_base, fallback=8192)
@@ -714,6 +780,9 @@ def ingest(
             skipped.append(fp.name)
         else:
             files_to_process.append(fp)
+
+    if limit:
+        files_to_process = files_to_process[:limit]
 
     n_total = len(all_files)
     n_skip  = len(skipped)
@@ -806,11 +875,13 @@ def ingest(
                 p.get("type", "concept") if p.get("type") in TYPE_DIRS else "concept",
             )
             for p in data.get("new_pages", [])
-            if (p.get("title") or "").strip()
+            if isinstance(p, dict) and (p.get("title") or "").strip()
         }
 
         # Create new pages
         for page in data.get("new_pages", []):
+            if not isinstance(page, dict):
+                continue
             ptype = page.get("type", "concept")
             if ptype not in TYPE_DIRS:
                 ptype = "concept"
@@ -842,6 +913,8 @@ def ingest(
 
         # Update existing pages
         for page in data.get("updated_pages", []):
+            if not isinstance(page, dict):
+                continue
             title_raw = (page.get("title") or "").strip()
             new_body = _autocorrect_wikilinks((page.get("body") or "").strip(), new_titles_set)
             tag = page.get("timeline_tag", "[refined]")
