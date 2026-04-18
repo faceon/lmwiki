@@ -101,6 +101,18 @@ def source_title(filepath: Path) -> str:
     """
     return filepath.stem
 
+def _first_sentence(text: str, limit: int = 60) -> str:
+    """Return the first complete sentence up to `limit` chars, or a truncated fragment."""
+    if not text:
+        return ""
+    for i, ch in enumerate(text):
+        if ch in ".!?。！？" and i < limit:
+            return text[:i + 1]
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(" ", 0, limit)
+    return (text[:cut] if cut > 0 else text[:limit]) + "…"
+
 # ── log ────────────────────────────────────────────────────────────────────────
 
 def load_log() -> dict:
@@ -125,13 +137,13 @@ def save_log(log_data: dict):
 # ── frontmatter ────────────────────────────────────────────────────────────────
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Return (meta_dict, body). meta always has keys: type, created, sources, related."""
+    """Return (meta_dict, body). meta always has keys: type, created, description, sources, related."""
     m = re.match(r"^---\n(.*?)\n---\n?(.*)", content, re.DOTALL)
     if not m:
-        return {"type": "concept", "created": "", "sources": [], "related": []}, content
+        return {"type": "concept", "created": "", "description": "", "sources": [], "related": []}, content
     fm_text, body = m.group(1), m.group(2).lstrip("\n")
 
-    meta: dict = {"type": "concept", "created": "", "sources": [], "related": []}
+    meta: dict = {"type": "concept", "created": "", "description": "", "sources": [], "related": []}
     current_list: Optional[str] = None
     for line in fm_text.splitlines():
         if line.startswith("type:"):
@@ -139,6 +151,9 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
             current_list = None
         elif line.startswith("created:"):
             meta["created"] = line[8:].strip()
+            current_list = None
+        elif line.startswith("description:"):
+            meta["description"] = line[12:].strip().strip("'\"")
             current_list = None
         elif line.startswith("sources:"):
             current_list = "sources"
@@ -153,8 +168,10 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
             current_list = None
     return meta, body
 
-def render_frontmatter(page_type: str, created: str, sources: list[str], related: list[str]) -> str:
+def render_frontmatter(page_type: str, created: str, description: str, sources: list[str], related: list[str]) -> str:
     lines = ["---", f"type: {page_type}", f"created: {created}"]
+    if description:
+        lines.append(f"description: '{description}'")
     if sources:
         lines.append("sources:")
         for s in sources:
@@ -239,6 +256,7 @@ def write_page(
     title: str,
     page_type: str,
     created: str,
+    description: str,
     sources: list[str],
     related: list[str],
     body: str,
@@ -247,7 +265,7 @@ def write_page(
     target_dir = TYPE_DIRS.get(page_type, TYPE_DIRS["concept"])
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    fm = render_frontmatter(page_type, created, sources, related)
+    fm = render_frontmatter(page_type, created, description, sources, related)
     clean_body = _strip_duplicate_h1(body, title).strip()
     parts = [fm, "", clean_body]
     if timeline:
@@ -276,15 +294,20 @@ def rebuild_index():
         for page_file in sorted(type_dir.glob("*.md")):
             title = page_file.stem
             content = page_file.read_text(encoding="utf-8")
-            _, body = parse_frontmatter(content)
+            meta, body = parse_frontmatter(content)
             if "\n## Timeline\n" in body:
                 body = body.split("\n## Timeline\n")[0]
-            desc = next(
-                (re.sub(r"\[\[([^\]]+)\]\]", r"\1", line).strip()[:120]
-                 for line in body.splitlines()
-                 if line.strip() and not line.startswith("#")),
-                "",
-            )
+
+            desc = meta.get("description", "")
+            if not desc:
+                # Fallback: first non-header line, cut at sentence boundary
+                first_line = next(
+                    (re.sub(r"\[\[([^\]]+)\]\]", r"\1", line).strip()
+                     for line in body.splitlines()
+                     if line.strip() and not line.startswith("#")),
+                    "",
+                )
+                desc = _first_sentence(first_line, limit=60)
             sections[page_type].append((title, desc))
 
     labels = {"concept": "Concepts", "entity": "Entities", "analysis": "Analyses"}
@@ -332,6 +355,7 @@ def link_source_siblings(titles: list[str]) -> int:
             title=title,
             page_type=meta.get("type", "concept"),
             created=meta.get("created") or today(),
+            description=meta.get("description", ""),
             sources=meta.get("sources", []),
             related=merged,
             body=body,
@@ -896,10 +920,11 @@ def ingest(
                 title=title,
                 page_type=ptype,
                 created=src_date,
+                description=(page.get("description") or "").strip(),
                 sources=[source_link],
                 related=list(dict.fromkeys(crosslinks)),
                 body=body,
-                timeline=[f"- {src_date[:10]}: [created] initial page from {source_link}"],
+                timeline=[f"- {src_date[:10]}: [created] initial page from [[{filepath.stem}]]"],
             )
             upsert_page(title, body, embed_texts)
             print(f"  [new] {ptype}/{title}.md")
@@ -950,12 +975,13 @@ def ingest(
 
             new_crosslinks = [f"[[{t}]]" for t in wikilinks_in(new_body) if t != title]
             merged_related = list(dict.fromkeys(meta.get("related", []) + new_crosslinks))
-            timeline.append(f"- {today()}: {tag} {detail}")
+            timeline.append(f"- {today()}: {tag} {detail} from [[{filepath.stem}]]")
 
             write_page(
                 title=title,
                 page_type=meta.get("type", "concept"),
                 created=meta.get("created") or today(),
+                description=(page.get("description") or meta.get("description") or "").strip(),
                 sources=sources,
                 related=merged_related,
                 body=new_body,

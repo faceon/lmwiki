@@ -20,13 +20,14 @@ Return JSON with this exact structure:
       "type": "concept OR entity",
       "title": "Title Case name — entities get @ prefix (e.g. @Google), concepts have none (e.g. LLM Wiki)",
       "body": "full markdown body — use [[Wikilinks]] for cross-references",
-      "description": "one-line description for the index"
+      "description": "One complete sentence, maximum 100 characters"
     }
   ],
   "updated_pages": [
     {
       "title": "Exact existing page title",
       "body": "updated full markdown body",
+      "description": "One complete sentence, maximum 100 characters",
       "timeline_tag": "[refined] OR [updated] OR [corrected]",
       "timeline_detail": "what changed and why"
     }
