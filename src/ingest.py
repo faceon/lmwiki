@@ -793,8 +793,36 @@ def ingest(
     # Query model context length once before spawning workers.
     ctx_len = get_context_length(model, api_base, fallback=8192)
     embed_tokens = embed_ctx_tokens()
-    print(f"LLM:   {model} @ {api_base or '(remote)'} — {ctx_len:,} tokens")
-    print(f"Embed: {EMBED_MODEL} @ {EMBED_API_BASE} — {embed_tokens:,} tokens")
+
+    def _fetch_loaded_models(base_url: Optional[str]) -> str:
+        if not base_url:
+            return ""
+        try:
+            import urllib.request
+            import json
+            req = urllib.request.Request(f"{base_url.rstrip('/')}/models")
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                loaded = [m.get("id") for m in data.get("data", []) if m.get("id")]
+                return ", ".join(loaded) if loaded else ""
+        except Exception:
+            return ""
+
+    server_models = {}
+    if api_base:
+        server_models[api_base] = _fetch_loaded_models(api_base)
+    if EMBED_API_BASE and EMBED_API_BASE not in server_models:
+        server_models[EMBED_API_BASE] = _fetch_loaded_models(EMBED_API_BASE)
+
+    print("Requests:")
+    print(f"  LLM:   {model} @ {api_base or '(remote)'} — {ctx_len:,} tokens")
+    print(f"  Embed: {EMBED_MODEL} @ {EMBED_API_BASE or '(remote)'} — {embed_tokens:,} tokens")
+
+    loaded_strs = [f"{url}: {mods}" for url, mods in server_models.items() if mods]
+    if loaded_strs:
+        print("Server Loaded:")
+        for s in loaded_strs:
+            print(f"  {s}")
 
     # ── Pre-filter: hash check (fast, synchronous) ─────────────────────────────
     files_to_process: list[Path] = []
